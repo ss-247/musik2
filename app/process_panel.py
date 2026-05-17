@@ -65,6 +65,7 @@ class ProcessPanel(QWidget):
     apply_requested   = Signal(float, float)   # pitch_steps, stretch_rate
     detect_bpm_req    = Signal()
     preview_sel_req   = Signal()
+    scan_loops_req    = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -147,9 +148,15 @@ class ProcessPanel(QWidget):
         self._reset_btn = QPushButton("RESET")
         self._reset_btn.setToolTip("Reset pitch and stretch to default")
 
+        self._scan_btn = QPushButton("⟳ SCAN LOOP PTS")
+        self._scan_btn.setToolTip(
+            "Find perfect loop points (beat-aligned zero crossings, scored by continuity)")
+        self._scan_btn.setStyleSheet(f"color:{AMBER}; border-color:{AMBER};")
+
         btn_row.addWidget(self._preview_btn)
         btn_row.addWidget(self._apply_btn)
         btn_row.addWidget(self._reset_btn)
+        btn_row.addWidget(self._scan_btn)
         btn_row.addStretch()
 
         btn_w = QWidget()
@@ -165,6 +172,7 @@ class ProcessPanel(QWidget):
         self._reset_btn.clicked.connect(self._on_reset)
         self._detect_btn.clicked.connect(self.detect_bpm_req)
         self._preview_btn.clicked.connect(self.preview_sel_req)
+        self._scan_btn.clicked.connect(self.scan_loops_req)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -175,6 +183,10 @@ class ProcessPanel(QWidget):
         label = "APPLYING…" if busy else "APPLY"
         self._apply_btn.setText(label)
         self._apply_btn.setEnabled(not busy)
+
+    def set_scanning(self, busy: bool):
+        self._scan_btn.setText("SCANNING…" if busy else "⟳ SCAN LOOP PTS")
+        self._scan_btn.setEnabled(not busy)
 
     @property
     def pitch_steps(self) -> float:

@@ -14,6 +14,7 @@ from app.spectrogram import SpectrogramView, detect_pitch
 from app.transport import TransportBar
 from app.info_panel import InfoPanel
 from app.process_panel import ProcessPanel, _ApplyWorker, _BPMWorker
+from app.loop_scanner import LoopScanWorker, LoopScanDialog
 from app.expander import ExpandedWaveform, ExpandedSpectrogram
 from app.theme import CYAN, AMBER, TEXT_DIM, BORDER, CYAN_DIM
 
@@ -132,6 +133,9 @@ class DeckWidget(QWidget):
         self._process.apply_requested.connect(self._on_apply)
         self._process.detect_bpm_req.connect(self._on_detect_bpm)
         self._process.preview_sel_req.connect(self._on_preview_sel)
+        self._process.scan_loops_req.connect(self._on_scan_loops)
+
+        self._scan_thread: QThread | None = None
 
     # ── Expand strip helper ───────────────────────────────────────────────────
 
@@ -246,6 +250,37 @@ class DeckWidget(QWidget):
         w.done.connect(self._process.set_bpm)
         t = self._bg(w, "_bpm_thread")
         w.done.connect(t.quit)
+
+    def _on_scan_loops(self):
+        if self._data is None:
+            return
+        self._process.set_scanning(True)
+        w = LoopScanWorker(self._data, self._sr)
+        w.done.connect(self._on_scan_done)
+        t = self._bg(w, "_scan_thread")
+        w.done.connect(t.quit)
+
+    def _on_scan_done(self, results: list):
+        self._process.set_scanning(False)
+        if not results:
+            return
+        dlg = LoopScanDialog(results, self._name, parent=self)
+        # clicking a row sets the waveform selection 0 → loop_point
+        dlg.set_selection.connect(self._waveform.show_selection)
+        # → BIN sends data slice to the bin
+        dlg.send_to_bin.connect(self._send_loop_to_bin)
+        dlg.show()
+
+    def _send_loop_to_bin(self, start_s: float, end_s: float):
+        if self._data is None:
+            return
+        s = int(start_s * self._sr)
+        e = int(end_s   * self._sr)
+        chunk = self._data[s:e].copy()
+        dur = (e - s) / self._sr
+        m, sec = int(dur) // 60, dur % 60
+        label = f"{self._name}  loop  {end_s:.2f}s  [{m}:{sec:04.1f}]"
+        self.send_to_bin.emit(chunk, self._sr, label)
 
     # ── Expand windows ────────────────────────────────────────────────────────
 
