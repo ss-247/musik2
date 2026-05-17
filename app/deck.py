@@ -14,7 +14,8 @@ from app.spectrogram import SpectrogramView, detect_pitch
 from app.transport import TransportBar
 from app.info_panel import InfoPanel
 from app.process_panel import ProcessPanel, _ApplyWorker, _BPMWorker
-from app.theme import CYAN, MAGENTA, AMBER, TEXT_DIM, CYAN_DIM
+from app.expander import ExpandedWaveform, ExpandedSpectrogram
+from app.theme import CYAN, AMBER, TEXT_DIM, BORDER, CYAN_DIM
 
 
 class _PitchWorker(QObject):
@@ -29,11 +30,11 @@ class _PitchWorker(QObject):
 
 
 class DeckWidget(QWidget):
-    """One deck: load → view → modify → route."""
+    """One deck: load → view → expand → modify → route → bin."""
 
     load_error   = Signal(str)
-    # target: None = new deck, or a DeckWidget reference for existing
-    send_to_deck = Signal(np.ndarray, int, str, object)
+    send_to_deck = Signal(np.ndarray, int, str, object)  # data,sr,label,target
+    send_to_bin  = Signal(np.ndarray, int, str)          # data,sr,label
 
     def __init__(self, name: str = "A", parent=None):
         super().__init__(parent)
@@ -44,8 +45,6 @@ class DeckWidget(QWidget):
         self._pitch_thread: QThread | None = None
         self._apply_thread: QThread | None = None
         self._bpm_thread:   QThread | None = None
-
-        # injected by main window — returns list of (name, DeckWidget)
         self.get_sibling_decks: callable = lambda: []
 
         layout = QVBoxLayout(self)
@@ -53,56 +52,64 @@ class DeckWidget(QWidget):
         layout.setSpacing(0)
 
         # ── header ──────────────────────────────────────────────────────────
-        header = QHBoxLayout()
-        header.setContentsMargins(8, 2, 8, 2)
+        hdr = QHBoxLayout()
+        hdr.setContentsMargins(8, 2, 8, 2)
         lbl = QLabel(f"DECK  {name}")
         lbl.setObjectName("title")
-        header.addWidget(lbl)
-        header.addStretch()
+        hdr.addWidget(lbl)
+        hdr.addStretch()
         self._file_lbl = QLabel("no file loaded")
         self._file_lbl.setObjectName("stat_key")
         self._file_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        header.addWidget(self._file_lbl)
-        layout.addLayout(header)
+        hdr.addWidget(self._file_lbl)
+        layout.addLayout(hdr)
 
         # ── waveform + spectrogram ───────────────────────────────────────────
-        self._waveform     = WaveformView(self)
-        self._spectrogram  = SpectrogramView(link_to=self._waveform._left, parent=self)
+        self._waveform    = WaveformView(self)
+        self._spectrogram = SpectrogramView(link_to=self._waveform._left, parent=self)
         for w in (self._waveform, self._spectrogram):
             w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        # expand buttons sit in thin strips above each view
+        wave_wrap  = self._wrapped(self._waveform,    "WAVEFORM",    self._expand_wave)
+        spec_wrap  = self._wrapped(self._spectrogram, "SPECTROGRAM", self._expand_spec)
 
         vsplit = QSplitter(Qt.Vertical)
         vsplit.setHandleWidth(5)
         vsplit.setStyleSheet("QSplitter::handle{background:#1a3a4a;border-top:1px solid #00f5ff;}")
-        vsplit.addWidget(self._waveform)
-        vsplit.addWidget(self._spectrogram)
+        vsplit.addWidget(wave_wrap)
+        vsplit.addWidget(spec_wrap)
         vsplit.setSizes([200, 200])
         vsplit.setCollapsible(0, False)
         vsplit.setCollapsible(1, False)
         layout.addWidget(vsplit, stretch=1)
 
         # ── edit bar ────────────────────────────────────────────────────────
-        edit_bar = QHBoxLayout()
-        edit_bar.setContentsMargins(8, 3, 8, 3)
-        edit_bar.setSpacing(6)
+        edit = QHBoxLayout()
+        edit.setContentsMargins(8, 3, 8, 3)
+        edit.setSpacing(6)
 
-        self._btn_reverse = QPushButton("⟵ REVERSE")
-        self._btn_reverse.setToolTip("Reverse selection (or whole track)")
-        self._btn_reverse.setStyleSheet(f"color:{AMBER}; border-color:{AMBER};")
+        def ebtn(text, tip, color=None):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            if color:
+                b.setStyleSheet(f"color:{color}; border-color:{color};")
+            return b
 
-        self._btn_send = QPushButton("→ DECK ▾")
-        self._btn_send.setToolTip("Send selection to a deck (click for menu)")
-        self._btn_send.setStyleSheet(f"color:{CYAN}; border-color:{CYAN};")
+        self._btn_reverse = ebtn("⟵ REVERSE", "Reverse selection or whole track", AMBER)
+        self._btn_send    = ebtn("→ DECK ▾",  "Send selection to a deck",          CYAN)
+        self._btn_bin     = ebtn("→ BIN",     "Add selection to Sample Bin",        "#b060ff")
 
         self._btn_reverse.clicked.connect(self._on_reverse)
         self._btn_send.clicked.connect(self._on_send_menu)
+        self._btn_bin.clicked.connect(self._on_send_to_bin)
 
-        edit_bar.addWidget(self._btn_reverse)
-        edit_bar.addWidget(self._btn_send)
-        edit_bar.addStretch()
+        for b in (self._btn_reverse, self._btn_send, self._btn_bin):
+            edit.addWidget(b)
+        edit.addStretch()
 
         edit_w = QWidget()
-        edit_w.setLayout(edit_bar)
+        edit_w.setLayout(edit)
         layout.addWidget(edit_w)
 
         # ── process panel ────────────────────────────────────────────────────
@@ -122,10 +129,40 @@ class DeckWidget(QWidget):
         self._waveform.scrub_pos.connect(self._spectrogram.set_playhead)
         self._transport.playhead_tick.connect(self._waveform.set_playhead)
         self._transport.playhead_tick.connect(self._spectrogram.set_playhead)
-
         self._process.apply_requested.connect(self._on_apply)
         self._process.detect_bpm_req.connect(self._on_detect_bpm)
         self._process.preview_sel_req.connect(self._on_preview_sel)
+
+    # ── Expand strip helper ───────────────────────────────────────────────────
+
+    def _wrapped(self, widget: QWidget, label: str, expand_fn) -> QWidget:
+        """Wrap a view in a QWidget with a thin header strip + ⤢ button."""
+        w = QWidget()
+        vl = QVBoxLayout(w)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(0)
+
+        strip = QHBoxLayout()
+        strip.setContentsMargins(6, 1, 4, 1)
+        lbl = QLabel(label)
+        lbl.setObjectName("stat_key")
+        strip.addWidget(lbl)
+        strip.addStretch()
+        exp_btn = QPushButton("⤢")
+        exp_btn.setFixedSize(20, 18)
+        exp_btn.setToolTip(f"Open {label} in large floating window")
+        exp_btn.setStyleSheet(f"color:{CYAN_DIM}; border:none; padding:0;")
+        exp_btn.clicked.connect(expand_fn)
+        strip.addWidget(exp_btn)
+
+        strip_w = QWidget()
+        strip_w.setLayout(strip)
+        strip_w.setFixedHeight(20)
+        strip_w.setStyleSheet(f"background:#0d0d18; border-bottom:1px solid {BORDER};")
+
+        vl.addWidget(strip_w)
+        vl.addWidget(widget, stretch=1)
+        return w
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -136,8 +173,7 @@ class DeckWidget(QWidget):
             self.load_error.emit(str(e))
             return
         self._path = path
-        fname = path.replace("\\", "/").split("/")[-1]
-        self._load(data, sr, fname)
+        self._load(data, sr, path.replace("\\", "/").split("/")[-1])
 
     def load_data(self, data: np.ndarray, sr: int, label: str = "selection"):
         self._path = None
@@ -172,25 +208,23 @@ class DeckWidget(QWidget):
 
     # ── Background workers ────────────────────────────────────────────────────
 
-    def _bg(self, worker: QObject, thread_attr: str):
-        """Move worker to a new QThread, start it, store reference."""
-        old = getattr(self, thread_attr, None)
+    def _bg(self, worker, attr):
+        old = getattr(self, attr, None)
         if old and old.isRunning():
             old.quit(); old.wait(300)
         t = QThread(self)
         worker.moveToThread(t)
         t.started.connect(worker.run)
         t.start()
-        setattr(self, thread_attr, t)
-        setattr(self, thread_attr + "_worker", worker)
+        setattr(self, attr, t)
+        setattr(self, attr + "_worker", worker)
+        return t
 
     def _run_pitch_detection(self, data, sr):
         w = _PitchWorker(data, sr)
         w.done.connect(self._info.set_pitch)
-        w.done.connect(self.sender().__class__.quit if False else lambda *_: None)
-        # simpler: connect quit directly
-        self._bg(w, "_pitch_thread")
-        w.done.connect(self._pitch_thread.quit)
+        t = self._bg(w, "_pitch_thread")
+        w.done.connect(t.quit)
 
     def _on_apply(self, pitch: float, stretch: float):
         if self._data is None:
@@ -198,22 +232,35 @@ class DeckWidget(QWidget):
         self._process.set_busy(True)
         w = _ApplyWorker(self._data, self._sr, pitch, stretch)
         w.done.connect(self._on_apply_done)
-        w.done.connect(self._apply_thread.quit if self._apply_thread else lambda _: None)
-        self._bg(w, "_apply_thread")
-        w.done.connect(self._apply_thread.quit)
+        t = self._bg(w, "_apply_thread")
+        w.done.connect(t.quit)
 
-    def _on_apply_done(self, data: np.ndarray):
+    def _on_apply_done(self, data):
         self._process.set_busy(False)
-        label = self._file_lbl.text()
-        self._load(data, self._sr, label)
+        self._load(data, self._sr, self._file_lbl.text())
 
     def _on_detect_bpm(self):
         if self._data is None:
             return
         w = _BPMWorker(self._data, self._sr)
         w.done.connect(self._process.set_bpm)
-        self._bg(w, "_bpm_thread")
-        w.done.connect(self._bpm_thread.quit)
+        t = self._bg(w, "_bpm_thread")
+        w.done.connect(t.quit)
+
+    # ── Expand windows ────────────────────────────────────────────────────────
+
+    def _expand_wave(self):
+        if self._data is None:
+            return
+        win = ExpandedWaveform(self._data, self._sr, self._name, parent=self)
+        win.selection_committed.connect(self._waveform.show_selection)
+        win.show()
+
+    def _expand_spec(self):
+        if self._data is None:
+            return
+        win = ExpandedSpectrogram(self._data, self._sr, self._name, parent=self)
+        win.show()
 
     # ── Edit actions ──────────────────────────────────────────────────────────
 
@@ -235,36 +282,40 @@ class DeckWidget(QWidget):
             return
         sel = self._waveform.get_selection()
         if sel:
-            a, b = sorted(sel)
-            self._transport.play_selection(a, b)
+            self._transport.play_selection(*sorted(sel))
+
+    def _on_send_to_bin(self):
+        if self._data is None:
+            return
+        data, label = self._selection_or_all()
+        self.send_to_bin.emit(data, self._sr, label)
 
     def _on_send_menu(self):
         if self._data is None:
             return
         menu = QMenu(self)
-        menu.setStyleSheet("QMenu{background:#0d0d18;color:#c8e8ff;border:1px solid #1a2a3a;}"
-                           "QMenu::item:selected{background:#007a80;color:#000;}")
-
+        menu.setStyleSheet(
+            "QMenu{background:#0d0d18;color:#c8e8ff;border:1px solid #1a2a3a;}"
+            "QMenu::item:selected{background:#007a80;color:#000;}"
+        )
         new_act = QAction("+ NEW DECK", self)
         new_act.triggered.connect(lambda: self._send_to(None))
         menu.addAction(new_act)
         menu.addSeparator()
-
-        for sibling_name, sibling in self.get_sibling_decks():
-            act = QAction(f"DECK  {sibling_name}", self)
-            act.triggered.connect(lambda _=False, s=sibling: self._send_to(s))
+        for sname, sdeck in self.get_sibling_decks():
+            act = QAction(f"DECK  {sname}", self)
+            act.triggered.connect(lambda _=False, d=sdeck: self._send_to(d))
             menu.addAction(act)
-
         menu.exec(self._btn_send.mapToGlobal(self._btn_send.rect().bottomLeft()))
 
     def _send_to(self, target):
+        data, label = self._selection_or_all()
+        self.send_to_deck.emit(data, self._sr, label, target)
+
+    def _selection_or_all(self) -> tuple[np.ndarray, str]:
         sel = self._waveform.get_selection()
         if sel:
             a, b = sorted(sel)
             s, e = int(a * self._sr), int(b * self._sr)
-            chunk = self._data[s:e].copy()
-            label = f"{self._name}  {a:.2f}s–{b:.2f}s"
-        else:
-            chunk = self._data.copy()
-            label = f"copy  {self._name}"
-        self.send_to_deck.emit(chunk, self._sr, label, target)
+            return self._data[s:e].copy(), f"{self._name}  {a:.2f}s–{b:.2f}s"
+        return self._data.copy(), f"copy  {self._name}"
