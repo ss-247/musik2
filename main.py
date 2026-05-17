@@ -11,6 +11,7 @@ from app.theme import STYLESHEET
 from app.deck import DeckWidget
 from app.file_browser import FileBrowserPanel
 from app.sample_bin import SampleBinPanel
+from app.mixer import MixerPanel
 
 _DECK_LETTERS = "ABCDEFGHIJKLMNOP"
 
@@ -45,6 +46,14 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, right_dock)
         self._bin.send_to_deck.connect(self._on_send_to_deck)
 
+        # ── Mixer (bottom dock) ────────────────────────────────────────────
+        self._mixer = MixerPanel()
+        mix_dock = QDockWidget("MIXER", self)
+        mix_dock.setWidget(self._mixer)
+        mix_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        mix_dock.setMinimumHeight(280)
+        self.addDockWidget(Qt.BottomDockWidgetArea, mix_dock)
+
         # ── Deck tabs ──────────────────────────────────────────────────────
         self._tabs = QTabWidget()
         self._tabs.setTabPosition(QTabWidget.North)
@@ -68,6 +77,7 @@ class MainWindow(QMainWindow):
         deck.load_error.connect(lambda msg: self.statusBar().showMessage(msg, 5000))
         deck.send_to_deck.connect(self._on_send_to_deck)
         deck.send_to_bin.connect(self._bin.add_clip)
+        deck.send_to_bin.connect(self._mixer.add_clip)
         deck.get_sibling_decks = self._siblings_for(deck)
         self._decks.append(deck)
         self._tabs.addTab(deck, f"  DECK {letter}  ")
