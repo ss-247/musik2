@@ -117,9 +117,7 @@ class _ChannelPlot(pg.PlotWidget):
     # ── Mouse interaction ───────────────────────────────────────────────────
 
     def _to_data(self, ev) -> float:
-        """Convert a QMouseEvent position to data-space x (seconds)."""
-        scene = self.mapToScene(ev.position())
-        return self.plotItem.vb.mapSceneToView(scene).x()
+        return self.plotItem.vb.mapSceneToView(QPointF(ev.position())).x()
 
     def mousePressEvent(self, ev):
         if ev.button() == Qt.LeftButton:
