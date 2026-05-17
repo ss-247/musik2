@@ -116,33 +116,45 @@ class _ChannelPlot(pg.PlotWidget):
 
     # ── Mouse interaction ───────────────────────────────────────────────────
 
+    def _to_data(self, ev) -> float:
+        """Convert a QMouseEvent position to data-space x (seconds)."""
+        scene = self.mapToScene(ev.position())
+        return self.plotItem.vb.mapSceneToView(scene).x()
+
     def mousePressEvent(self, ev):
         if ev.button() == Qt.LeftButton:
             if ev.modifiers() & Qt.ShiftModifier:
-                pos = self.plotItem.vb.mapSceneToView(QPointF(ev.position()))
-                self._shift_start = pos.x()
-                self._region.setRegion((pos.x(), pos.x()))
+                x = self._to_data(ev)
+                self._shift_start = x
+                self._region.setRegion((x, x))
                 self._region.show()
+                ev.accept()   # block PyQtGraph's shift+zoom-rect
+                return
             else:
                 self._dragging_scrub = True
-                pos = self.plotItem.vb.mapSceneToView(QPointF(ev.position()))
-                t = max(0.0, min(self._duration, pos.x()))
+                t = max(0.0, min(self._duration, self._to_data(ev)))
                 self.scrub_pos.emit(t)
         super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev):
-        pos = self.plotItem.vb.mapSceneToView(QPointF(ev.position()))
         if self._shift_start is not None:
-            a, b = self._shift_start, pos.x()
-            self._region.setRegion((min(a, b), max(a, b)))
-        elif self._dragging_scrub:
-            t = max(0.0, min(self._duration, pos.x()))
+            x = self._to_data(ev)
+            self._region.setRegion((min(self._shift_start, x), max(self._shift_start, x)))
+            ev.accept()
+            return
+        if self._dragging_scrub:
+            t = max(0.0, min(self._duration, self._to_data(ev)))
             self.scrub_pos.emit(t)
         super().mouseMoveEvent(ev)
 
     def mouseReleaseEvent(self, ev):
+        if self._shift_start is not None:
+            # finalise selection — don't let PyQtGraph reset the view
+            self._shift_start = None
+            self._dragging_scrub = False
+            ev.accept()
+            return
         self._dragging_scrub = False
-        self._shift_start = None
         super().mouseReleaseEvent(ev)
 
     def wheelEvent(self, ev):
